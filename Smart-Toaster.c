@@ -17,8 +17,9 @@
 // LCD update interval (ms) to avoid blocking the main loop too long
 #define LCD_UPDATE_MS 200
 
-// Debug prints (set to 1 to enable)
-#define DEBUG 1
+// Debug prints (set to 1 to enable). Keep disabled by default to avoid
+// expensive blocking stdio calls in tight loops.
+#define DEBUG 0
 #if DEBUG
 #define DPRINTF(...) printf(__VA_ARGS__)
 #else
@@ -248,7 +249,10 @@ static void lcd_force_update(uint8_t mode, uint8_t setting_option, bool running)
 static void lcd_maybe_update(uint8_t mode, uint8_t setting_option, bool running) {
     int current_display_seconds = running ? (int)roundf((float)time_target / 1000.0f) : -1;
     int64_t since_lcd_ms = absolute_time_diff_us(last_lcd_update, get_absolute_time()) / 1000;
-    if (!running || current_display_seconds != last_display_seconds || since_lcd_ms >= LCD_UPDATE_MS) {
+    // Only update when the displayed seconds change or after the LCD timeout.
+    // Avoid unconditional updates while idle because the LCD writes are
+    // blocking and can dominate the main loop latency.
+    if (current_display_seconds != last_display_seconds || since_lcd_ms >= LCD_UPDATE_MS) {
         lcd_force_update(mode, setting_option, running);
     }
 }
@@ -345,7 +349,7 @@ int main() {
         prev_start_btn = start_btn;
         start_btn = !gpio_get(PIN_BTN_START);
 
-        if (!mode_btn && prev_mode_btn && !running) {
+        if (mode_btn && !prev_mode_btn && !running) {
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -360,7 +364,7 @@ int main() {
         }
 
         DPRINTF("Up Button Stale: %d, Press Time: %d, Running: %d, Mode: %d\n", up_btn_stale, up_btn_press_time, running, mode);
-        if (mode == 1 && !up_btn_stale && (up_btn_press_time >= 1000 / LOOP_DELAY_MS) && !running) {
+        if (mode == 1 && !up_btn_stale && up_btn_press_time >= 500 && !running) {
             // Long press changes setting option in bake mode
             setting_option = (setting_option + 1) % 2;
             DPRINTF("long press happened\n");
@@ -369,7 +373,20 @@ int main() {
             lcd_force_update(mode, setting_option, running);
         }
 
+        // Wake the screen immediately on press (rising edge) so it feels responsive,
+        // but keep the short-press action on release so long-press behaviour isn't lost.
+        if (up_btn && !prev_up_btn) {
+            if (is_nil_time(screenTimeout)) {
+                lcd_on();
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+                continue;
+            }
+            // reset the timeout on press but don't perform the increment yet
+            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        }
+
         if (!up_btn && prev_up_btn && !up_btn_stale && !running) {
+            // short press (release) — perform the increment/decrement
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -392,7 +409,7 @@ int main() {
             lcd_force_update(mode, setting_option, running);
         }
 
-        if (!down_btn && prev_down_btn && !running) {
+        if (down_btn && !prev_down_btn && !running) {
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -415,7 +432,7 @@ int main() {
             lcd_force_update(mode, setting_option, running);
         }
 
-        if (!start_btn && prev_start_btn) {
+        if (start_btn && !prev_start_btn) {
             if (!running && is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
