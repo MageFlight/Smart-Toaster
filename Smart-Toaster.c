@@ -23,6 +23,11 @@
 
 #define PIN_RELAY 7
 
+#define PIN_BTN_MODE 16
+#define PIN_BTN_UP   17
+#define PIN_BTN_DWN  18
+#define PIN_BTN_STRT 19
+
 // commands
 const int LCD_CLEARDISPLAY = 0x01;
 const int LCD_RETURNHOME = 0x02;
@@ -159,6 +164,20 @@ int main() {
     gpio_put(PIN_CS, 1);
     // For more examples of SPI use see https://github.com/raspberrypi/pico-examples/tree/master/spi
 
+    // Set up button pins
+    gpio_set_function(PIN_BTN_MODE, GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_UP,   GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_DWN,  GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_STRT, GPIO_FUNC_SIO);
+    gpio_set_dir(PIN_BTN_MODE, GPIO_IN);
+    gpio_set_dir(PIN_BTN_UP,   GPIO_IN);
+    gpio_set_dir(PIN_BTN_DWN,  GPIO_IN);
+    gpio_set_dir(PIN_BTN_STRT, GPIO_IN);
+    gpio_pull_up(PIN_BTN_MODE);
+    gpio_pull_up(PIN_BTN_UP);
+    gpio_pull_up(PIN_BTN_DWN);
+    gpio_pull_up(PIN_BTN_STRT);
+
     // I2C Initialisation. Using it at 100Khz.
     i2c_init(I2C_PORT, 100000);
     
@@ -179,6 +198,8 @@ int main() {
             lcd_send_byte(LCD_DISPLAYCONTROL, LCD_COMMAND);
         }
 
-        sleep_ms(50);
+        printf("Button Status: %d %d %d %d\n", gpio_get(PIN_BTN_MODE), gpio_get(PIN_BTN_UP), gpio_get(PIN_BTN_DWN), gpio_get(PIN_BTN_STRT));
+
+        sleep_ms(1000);
     }
 }
