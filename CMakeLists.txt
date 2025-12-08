@@ -60,6 +60,7 @@ target_include_directories(Smart-Toaster PRIVATE
 target_link_libraries(Smart-Toaster 
         hardware_spi
         hardware_i2c
+        pico_time
         )
 
 pico_add_extra_outputs(Smart-Toaster)
