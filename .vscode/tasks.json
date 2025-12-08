@@ -23,7 +23,7 @@
             "command": "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
             "args": [
                 "load",
-                "${workspaceFolder}/build/src/Smart-Toaster.elf",
+                "${command:raspberry-pi-pico.launchTargetPath}",
                 "-fx"
             ],
             "presentation": {
