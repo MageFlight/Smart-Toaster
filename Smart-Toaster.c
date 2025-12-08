@@ -18,6 +18,10 @@
 // LCD update interval (ms) to avoid blocking the main loop too long
 #define LCD_UPDATE_MS 200
 
+#define ACTION_BEEP_LENGTH   50
+#define START_BEEP_LENGTH    200 
+#define COMPLETE_BEEP_LENGTH 500
+
 // Debug prints (set to 1 to enable). Keep disabled by default to avoid
 // expensive blocking stdio calls in tight loops.
 #define DEBUG 0
@@ -31,7 +35,7 @@
 static const char *const modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
 static const char *const running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
 
-static int toast_time = 240; // seconds
+static int toast_time = 10; // seconds
 static int bake_time = 300;  // seconds
 static int bake_temp = 350;  // Fahrenheit
 static bool timer_counting = false;
@@ -60,6 +64,8 @@ static int last_display_seconds = -1;
 #define PIN_BTN_UP    17
 #define PIN_BTN_DOWN  18
 #define PIN_BTN_START 19
+
+#define PIN_BUZZER 20
 
 // LCD constants
 enum {
@@ -257,6 +263,29 @@ static void lcd_maybe_update(uint8_t mode, uint8_t setting_option, bool running)
     }
 }
 
+static bool beeping = false;
+int64_t beep_callback(alarm_id_t id, void* user_data) {
+    DPRINTF("Stopping Beep\n");
+    gpio_put(PIN_BUZZER, 0);
+    beeping = false;
+    cancel_alarm(id);
+}
+
+// Beep the buzzer for x milliseconds
+static void beep(int ms, bool synchronus) {
+    DPRINTF("Wanting to beep. Currently active: %d\n", beeping);
+    if (beeping) return;
+
+    gpio_put(PIN_BUZZER, 1);
+    if (synchronus) {
+        sleep_ms(ms);
+        gpio_put(PIN_BUZZER, 0);
+    } else {
+        beeping = true;
+        add_alarm_in_ms(ms, beep_callback, NULL, false);
+    }
+}
+
 /* --- Read temperature from SPI sensor (unchanged) --- */
 float read_temp(void) {
     uint8_t buffer[2];
@@ -285,7 +314,7 @@ static void init_spi_and_sensors(void) {
     gpio_put(PIN_CS, 1);
 }
 
-static void init_buttons_and_relay(ButtonState *mode_btn, ButtonState *up_btn, ButtonState *down_btn, ButtonState *start_btn) {
+static void init_buttons(ButtonState *mode_btn, ButtonState *up_btn, ButtonState *down_btn, ButtonState *start_btn) {
     gpio_set_function(PIN_BTN_MODE,  GPIO_FUNC_SIO);
     gpio_set_function(PIN_BTN_UP,    GPIO_FUNC_SIO);
     gpio_set_function(PIN_BTN_DOWN,  GPIO_FUNC_SIO);
@@ -303,9 +332,16 @@ static void init_buttons_and_relay(ButtonState *mode_btn, ButtonState *up_btn, B
     button_init(up_btn, PIN_BTN_UP);
     button_init(down_btn, PIN_BTN_DOWN);
     button_init(start_btn, PIN_BTN_START);
+}
 
+static void init_relay() {
     gpio_set_function(PIN_RELAY, GPIO_FUNC_SIO);
     gpio_set_dir(PIN_RELAY, GPIO_OUT);
+}
+
+static void init_buzzer() {
+    gpio_set_function(PIN_BUZZER, GPIO_FUNC_SIO);
+    gpio_set_dir(PIN_BUZZER, GPIO_OUT);
 }
 
 static void init_i2c_and_lcd(void) {
@@ -322,28 +358,27 @@ static void init_i2c_and_lcd(void) {
 }
 
 /* --- Main loop helpers: button handlers and timer processing --- */
-static void handle_mode_button(ButtonState *b, uint8_t *mode, uint8_t *setting_option, bool running, absolute_time_t *screenTimeout) {
+static void handle_mode_button(ButtonState *b, uint8_t *mode, uint8_t *setting_option, bool running, absolute_time_t *screen_timeout) {
     if (b->cur && !b->prev && !running) {
-        if (is_nil_time(*screenTimeout)) {
+        if (is_nil_time(*screen_timeout)) {
             lcd_on();
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             return;
         }
-        *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
         *mode = ++(*mode) % (sizeof(modes) / sizeof(modes[0]));
         *setting_option = 0;
+        beep(ACTION_BEEP_LENGTH, false);
 
         lcd_force_update(*mode, *setting_option, running);
     }
 }
 
-static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_option, bool running, absolute_time_t *screenTimeout) {
-    DPRINTF("Up Button Stale: %d, Press Time: %d, Running: %d, Mode: %d\n", b->stale, b->press_time_ms, running, mode);
+static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_option, bool running, absolute_time_t *screen_timeout) {
     if (mode == 1 && !b->stale && b->press_time_ms >= LONG_PRESS_MS && !running) {
         // Long press changes setting option in bake mode
         *setting_option = (uint8_t)((*setting_option + 1) % 2);
-        DPRINTF("long press happened\n");
         b->stale = true;
 
         lcd_force_update(mode, *setting_option, running);
@@ -352,22 +387,25 @@ static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_opti
 
     // Wake screen on press (rising edge) — feel responsive
     if (b->cur && !b->prev) {
-        if (is_nil_time(*screenTimeout)) {
+        if (is_nil_time(*screen_timeout)) {
             lcd_on();
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            b->stale = true;
             return;
         }
-        *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+        beep(ACTION_BEEP_LENGTH, false);
     }
 
     // Short press on release
     if (!b->cur && b->prev && !b->stale && !running) {
-        if (is_nil_time(*screenTimeout)) {
+        if (is_nil_time(*screen_timeout)) {
             lcd_on();
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             return;
         }
-        *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
         switch (mode) {
             case 0:
@@ -385,14 +423,14 @@ static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_opti
     }
 }
 
-static void handle_down_button(ButtonState *b, uint8_t mode, uint8_t setting_option, bool running, absolute_time_t *screenTimeout) {
+static void handle_down_button(ButtonState *b, uint8_t mode, uint8_t setting_option, bool running, absolute_time_t *screen_timeout) {
     if (b->cur && !b->prev && !running) {
-        if (is_nil_time(*screenTimeout)) {
+        if (is_nil_time(*screen_timeout)) {
             lcd_on();
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             return;
         }
-        *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
         switch (mode) {
             case 0:
@@ -405,47 +443,53 @@ static void handle_down_button(ButtonState *b, uint8_t mode, uint8_t setting_opt
                     bake_time = MAX(bake_time - BAKE_TIME_INC, 30);
                 break;
         }
+        beep(ACTION_BEEP_LENGTH, false);
 
         lcd_force_update(mode, setting_option, running);
     }
 }
 
-static void handle_start_button(ButtonState *b, uint8_t mode, uint8_t setting_option, bool *running, absolute_time_t *screenTimeout) {
+static void handle_start_button(ButtonState *b, uint8_t mode, uint8_t setting_option, bool *running, absolute_time_t *screen_timeout) {
     if (b->cur && !b->prev) {
-        if (!*running && is_nil_time(*screenTimeout)) {
+        if (!*running && is_nil_time(*screen_timeout)) {
             lcd_on();
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             return;
         }
-        if (!*running) *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+        if (!*running) *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
         *running = !*running;
+        beep(*running ? START_BEEP_LENGTH : ACTION_BEEP_LENGTH, false);
+
         if (*running) {
-            *screenTimeout = nil_time;
+            *screen_timeout = nil_time;
             start_time = get_absolute_time();
             temp_target = (mode == 1) ? (int)((float)(bake_temp - 32) * (5.0f / 9.0f)) : 0;
             time_target = ((mode == 0) ? toast_time : bake_time) * 1000; // convert seconds -> ms
             timer_counting = (mode == 0);
         } else {
+            DPRINTF("Button stopped\n");
             gpio_put(PIN_RELAY, 0);
             lcd_force_update(mode, setting_option, *running);
-            *screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
         }
     }
 }
 
-static void process_timing(bool *running, uint8_t mode, uint8_t setting_option) {
-    if (!*running) return;
+static void process_cycle(bool *running, uint8_t mode, uint8_t setting_option, absolute_time_t* screen_timeout) {
+    if (time_target <= 0) {
+        gpio_put(PIN_RELAY, 0);
+        *running = false;
+        lcd_force_update(mode, setting_option, *running);
 
-    int64_t real_elapsed_ms = absolute_time_diff_us(start_time, get_absolute_time()) / 1000;
-    DPRINTF("Real elapsed: %lld ms\n", (long long)real_elapsed_ms);
+        DPRINTF("Completed Cycle %d\n");
+        beep(COMPLETE_BEEP_LENGTH, true);
+        sleep_ms(COMPLETE_BEEP_LENGTH);
+        beep(COMPLETE_BEEP_LENGTH, true);
+        sleep_ms(COMPLETE_BEEP_LENGTH);
+        beep(COMPLETE_BEEP_LENGTH, true);
 
-    if (*running) {
-        if (time_target <= 0) {
-            gpio_put(PIN_RELAY, 0);
-            *running = false;
-            lcd_force_update(mode, setting_option, *running);
-        }
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
     }
 }
 
@@ -456,13 +500,15 @@ int main(void) {
     init_spi_and_sensors();
 
     ButtonState mode_btn, up_btn, down_btn, start_btn;
-    init_buttons_and_relay(&mode_btn, &up_btn, &down_btn, &start_btn);
+    init_buttons(&mode_btn, &up_btn, &down_btn, &start_btn);
+    init_relay();
+    init_buzzer();
     init_i2c_and_lcd();
 
     uint8_t mode = 0;
     uint8_t setting_option = 0; // for bake mode: 0 = temp, 1 = time
     bool running = false;
-    absolute_time_t screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+    absolute_time_t screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
     lcd_force_update(mode, setting_option, running);
 
@@ -474,8 +520,8 @@ int main(void) {
         int32_t delta_us = absolute_time_diff_us(loop_start, get_absolute_time());
         int32_t delta_ms = (int32_t)((delta_us + 500) / 1000);
 
-        if (!is_nil_time(screenTimeout) && absolute_time_min(get_absolute_time(), screenTimeout) == screenTimeout) {
-            screenTimeout = nil_time;
+        if (!is_nil_time(screen_timeout) && absolute_time_min(get_absolute_time(), screen_timeout) == screen_timeout) {
+            screen_timeout = nil_time;
             lcd_off();
         }
 
@@ -486,19 +532,19 @@ int main(void) {
         button_update(&start_btn, delta_ms);
 
         // Handle events
-        handle_mode_button(&mode_btn, &mode, &setting_option, running, &screenTimeout);
-        handle_up_button(&up_btn, mode, &setting_option, running, &screenTimeout);
-        handle_down_button(&down_btn, mode, setting_option, running, &screenTimeout);
-        handle_start_button(&start_btn, mode, setting_option, &running, &screenTimeout);
-
-        // Update LCD periodically or when needed
-        lcd_maybe_update(mode, setting_option, running);
+        handle_mode_button(&mode_btn, &mode, &setting_option, running, &screen_timeout);
+        handle_up_button(&up_btn, mode, &setting_option, running, &screen_timeout);
+        handle_down_button(&down_btn, mode, setting_option, running, &screen_timeout);
+        handle_start_button(&start_btn, mode, setting_option, &running, &screen_timeout);
 
         // Apply timer countdown when running
         if (running) {
+            // Update LCD periodically or when needed
+            lcd_maybe_update(mode, setting_option, running);
+
             time_target -= delta_ms;
             DPRINTF("Time Target: %d (%d) diff: %d\n", time_target, (int)roundf((float)time_target / 1000.0f), delta_ms);
-            process_timing(&running, mode, setting_option);
+            process_cycle(&running, mode, setting_option, &screen_timeout);
         }
     }
 }
