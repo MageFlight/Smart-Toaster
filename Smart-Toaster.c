@@ -17,6 +17,14 @@
 // LCD update interval (ms) to avoid blocking the main loop too long
 #define LCD_UPDATE_MS 200
 
+// Debug prints (set to 1 to enable)
+#define DEBUG 0
+#if DEBUG
+#define DPRINTF(...) printf(__VA_ARGS__)
+#else
+#define DPRINTF(...) do {} while (0)
+#endif
+
 char* modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
 char* running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
 
@@ -28,6 +36,8 @@ bool timer_counting = false;
 absolute_time_t start_time;
 int time_target = 0; // In milliseconds
 int temp_target = 0; // Celsius
+static absolute_time_t last_lcd_update;
+static int last_display_seconds = -1;
 
 // SPI Defines
 #define SPI_PORT spi1
@@ -172,7 +182,7 @@ float read_temp() {
     sleep_ms(10);
     gpio_put(PIN_CS, 1);
 
-    printf("Data: %d %d\n", buffer[0], buffer[1]);
+    DPRINTF("Data: %d %d\n", buffer[0], buffer[1]);
     uint16_t raw = ((uint16_t)buffer[0] << 8) | (uint16_t)buffer[1];
     raw = raw >> 3;
     return (float)raw * 0.25f;
@@ -227,6 +237,22 @@ void draw_lcd(uint8_t mode, uint8_t setting_option, bool running) {
     }
 }
 
+// Force an immediate LCD update and refresh tracking state
+static void lcd_force_update(uint8_t mode, uint8_t setting_option, bool running) {
+    draw_lcd(mode, setting_option, running);
+    last_lcd_update = get_absolute_time();
+    last_display_seconds = running ? (int)roundf((float)time_target / 1000.0f) : -1;
+}
+
+// Update LCD only when visible seconds change or after a timeout
+static void lcd_maybe_update(uint8_t mode, uint8_t setting_option, bool running) {
+    int current_display_seconds = running ? (int)roundf((float)time_target / 1000.0f) : -1;
+    int64_t since_lcd_ms = absolute_time_diff_us(last_lcd_update, get_absolute_time()) / 1000;
+    if (!running || current_display_seconds != last_display_seconds || since_lcd_ms >= LCD_UPDATE_MS) {
+        lcd_force_update(mode, setting_option, running);
+    }
+}
+
 int main() {
     stdio_init_all();
 
@@ -271,6 +297,8 @@ int main() {
 
     lcd_init();
     lcd_clear();
+    last_lcd_update = get_absolute_time();
+    last_display_seconds = -1;
 
     bool prev_mode_btn = false;
     bool mode_btn = false;
@@ -290,12 +318,10 @@ int main() {
     uint8_t setting_option = 0; // for bake mode: 0 = temp, 1 = time
     bool running = false;
     absolute_time_t screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
-    absolute_time_t last_lcd_update = get_absolute_time();
-    int last_display_seconds = -1;
 
     absolute_time_t last_time = get_absolute_time();
 
-    draw_lcd(mode, setting_option, running);
+    lcd_force_update(mode, setting_option, running);
     while (true) {
         last_time = get_absolute_time();
         sleep_ms(LOOP_DELAY_MS);
@@ -330,7 +356,7 @@ int main() {
             mode = ++mode % (sizeof(modes) / sizeof(modes[0]));
             setting_option = 0;
 
-            draw_lcd(mode, setting_option, running);
+            lcd_force_update(mode, setting_option, running);
         }
 
         if (mode == 1 && !up_btn_stale && (up_btn_press_time > (1000 / LOOP_DELAY_MS)) && !running) {
@@ -338,7 +364,7 @@ int main() {
             setting_option = (setting_option + 1) % 2;
             up_btn_stale = true;
 
-            draw_lcd(mode, setting_option, running);
+            lcd_force_update(mode, setting_option, running);
         }
 
         if (!up_btn && prev_up_btn && !up_btn_stale && !running) {
@@ -361,7 +387,7 @@ int main() {
                     break;
             }
 
-            draw_lcd(mode, setting_option, running);
+            lcd_force_update(mode, setting_option, running);
         }
 
         if (!down_btn && prev_down_btn && !running) {
@@ -384,7 +410,7 @@ int main() {
                     break;
             }
 
-            draw_lcd(mode, setting_option, running);
+            lcd_force_update(mode, setting_option, running);
         }
 
         if (!start_btn && prev_start_btn) {
@@ -404,7 +430,7 @@ int main() {
                 timer_counting = mode == 0;
             } else {
                 gpio_put(PIN_RELAY, 0);
-                draw_lcd(mode, setting_option, running);
+                lcd_force_update(mode, setting_option, running);
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             }
         }
@@ -413,34 +439,25 @@ int main() {
            Only redraw when the displayed seconds would change, or as a fallback
            at least every LCD_UPDATE_MS. This prevents a large blocking I2C write
            from happening every few loops and causing visible jumps. */
-        int current_display_seconds = -1;
-        if (running) {
-            current_display_seconds = (int)roundf((float)time_target / 1000.0f);
-        }
-        int64_t since_lcd = absolute_time_diff_us(last_lcd_update, get_absolute_time()) / 1000;
-        if (!running || current_display_seconds != last_display_seconds || since_lcd >= LCD_UPDATE_MS) {
-            draw_lcd(mode, setting_option, running);
-            last_lcd_update = get_absolute_time();
-            last_display_seconds = current_display_seconds;
-        }
+        lcd_maybe_update(mode, setting_option, running);
 
         /* compute elapsed time for the whole iteration and apply when running */
         int32_t delta_us = absolute_time_diff_us(last_time, get_absolute_time());
         int32_t delta_ms = (int32_t)((delta_us + 500) / 1000); // round to nearest ms
         if (running) {
             time_target -= delta_ms;
-            printf("Timing: %d %d\n", to_ms_since_boot(last_time), to_ms_since_boot(get_absolute_time()));
-            printf("Time Target: %d (%d) diff: %d\n", time_target, (int)roundf((float)time_target / 1000.0f), delta_ms);
-            // Diagnostic: compare real elapsed time (ms) with counted-down elapsed time (ms)
+            DPRINTF("Timing: %d %d\n", to_ms_since_boot(last_time), to_ms_since_boot(get_absolute_time()));
+            DPRINTF("Time Target: %d (%d) diff: %d\n", time_target, (int)roundf((float)time_target / 1000.0f), delta_ms);
+            /* Diagnostic: compare real elapsed time (ms) with counted-down elapsed time (ms) */
             int32_t initial_ms = ((mode == 0) ? toast_time : bake_time) * 1000;
             int64_t real_elapsed_ms = absolute_time_diff_us(start_time, get_absolute_time()) / 1000;
             int32_t counted_elapsed_ms = initial_ms - time_target;
-            printf("Elapsed real: %lld ms, counted: %d ms\n", (long long)real_elapsed_ms, counted_elapsed_ms);
+            DPRINTF("Elapsed real: %lld ms, counted: %d ms\n", (long long)real_elapsed_ms, counted_elapsed_ms);
 
             if (time_target <= 0) {
                 gpio_put(PIN_RELAY, 0);
                 running = false;
-                draw_lcd(mode, setting_option, running);
+                lcd_force_update(mode, setting_option, running);
             }
         }
     }
