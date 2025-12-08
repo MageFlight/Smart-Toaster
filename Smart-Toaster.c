@@ -5,17 +5,29 @@
 #include "pico/time.h"
 
 #include <stdint.h>
+#include <math.h>
 
 // Settings
-#define SCREEN_TIMEOUT 30000
+#define SCREEN_TIMEOUT  30000
+#define TOAST_TIME_INC  15
+#define BAKE_TIME_INC   30
+#define BAKE_TEMP_INC   25
+#define LOOP_DELAY_MS   20
+#define TEMP_HYSTERESIS 2.5
+// LCD update interval (ms) to avoid blocking the main loop too long
+#define LCD_UPDATE_MS 200
 
 char* modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
 char* running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
 
-int settings[3] = {300, 350, 0};
+int toast_time = 240; // seconds
+int bake_time = 300;  // seconds
+int bake_temp = 350;  // Fahrenheit
+bool timer_counting = false;
 
-int time_target = 0;
-int temp_target = 0;
+absolute_time_t start_time;
+int time_target = 0; // In milliseconds
+int temp_target = 0; // Celsius
 
 // SPI Defines
 #define SPI_PORT spi1
@@ -166,33 +178,52 @@ float read_temp() {
     return (float)raw * 0.25f;
 }
 
-void get_settings_str(uint8_t mode, char* str) {
+void get_settings_str(uint8_t mode, uint8_t setting_option, char* str) {
     switch (mode) {
         case 0:
-            snprintf(str, 16, "  Time: %02d:%02d  ", settings[mode] / 60, settings[mode] % 60);
+            snprintf(str, 17, "  Time: %02d:%02d   ", toast_time / 60, toast_time % 60);
             break;
         case 1:
-            snprintf(str, 16, "   Temp: %3dF    ", settings[mode]);
+            if (setting_option == 0)
+                snprintf(str, 17, "   Temp: %3dF    ", bake_temp);
+            else
+                snprintf(str, 17, "   Time: %02d:%02d  ", bake_time / 60, bake_time % 60);
             break;
         default:
         case 2:
-            snprintf(str, 16, "                ");
+            snprintf(str, 17, "                ");
             break;
     }
 }
 
-void draw_lcd(uint8_t mode, bool running) {
+void draw_lcd(uint8_t mode, uint8_t setting_option, bool running) {
     if (!running) {
         lcd_set_cursor(0, 0);
         lcd_string(modes[mode]);
 
         lcd_set_cursor(1, 0);
-        char settings_str[16];
-        get_settings_str(mode, settings_str);
+        char settings_str[17];
+        get_settings_str(mode, setting_option, settings_str);
         lcd_string(settings_str);
     } else {
         lcd_set_cursor(0, 0);
         lcd_string(running_modes[mode]);
+
+        lcd_set_cursor(1, 0);
+        absolute_time_t current_time = get_absolute_time();
+            int remaining_time = round((float)time_target / 1000.0f);
+        switch (mode) {
+            case 0:
+                char time_str[17];
+                snprintf(time_str, 17, "Time Left: %02d:%02d", remaining_time / 60, remaining_time % 60);
+                lcd_string(time_str);
+                break;
+            case 1:
+                break;
+            case 2:
+                lcd_string("   Running...   ");
+                break;
+        }
     }
 }
 
@@ -241,45 +272,54 @@ int main() {
     lcd_init();
     lcd_clear();
 
-    bool modeBtn = false;
-    bool modeBtnStale = false;
+    bool prev_mode_btn = false;
+    bool mode_btn = false;
 
-    bool upBtn = false;
-    bool upBtnStale = false;
+    bool prev_up_btn = false;
+    bool up_btn = false;
+    bool up_btn_stale = false;
+    int up_btn_press_time = 0;
 
-    bool downBtn = false;
-    bool downBtnStale = false;
+    bool prev_down_btn = false;
+    bool down_btn = false;
 
-    bool startBtn = false;
-    bool startBtnStale = false;
+    bool prev_start_btn = false;
+    bool start_btn = false;
 
     uint8_t mode = 0;
+    uint8_t setting_option = 0; // for bake mode: 0 = temp, 1 = time
     bool running = false;
     absolute_time_t screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+    absolute_time_t last_lcd_update = get_absolute_time();
+    int last_display_seconds = -1;
 
-    draw_lcd(mode, running);
+    absolute_time_t last_time = get_absolute_time();
+
+    draw_lcd(mode, setting_option, running);
     while (true) {
-        sleep_ms(50);
+        last_time = get_absolute_time();
+        sleep_ms(LOOP_DELAY_MS);
 
         if (!is_nil_time(screenTimeout) && absolute_time_min(get_absolute_time(), screenTimeout) == screenTimeout) {
             screenTimeout = nil_time;
             lcd_off();
         }
 
-        modeBtn = !gpio_get(PIN_BTN_MODE);
-        modeBtnStale = modeBtnStale && modeBtn;
+        prev_mode_btn = mode_btn;
+        mode_btn = !gpio_get(PIN_BTN_MODE);
         
-        startBtn = !gpio_get(PIN_BTN_START);
-        startBtnStale = startBtnStale && startBtn;
+        prev_up_btn = up_btn;
+        up_btn = !gpio_get(PIN_BTN_UP);
+        up_btn_stale = up_btn_stale && prev_up_btn;
+        up_btn_press_time = up_btn * (up_btn_press_time + 1);
 
-        upBtn = !gpio_get(PIN_BTN_UP);
-        upBtnStale = upBtnStale && upBtn;
+        prev_down_btn = down_btn;
+        down_btn = !gpio_get(PIN_BTN_DOWN);
 
-        downBtn = !gpio_get(PIN_BTN_DOWN);
-        downBtnStale = downBtnStale && downBtn;
+        prev_start_btn = start_btn;
+        start_btn = !gpio_get(PIN_BTN_START);
 
-        if (modeBtn && !modeBtnStale && !running) {
-            modeBtnStale = true;
+        if (!mode_btn && prev_mode_btn && !running) {
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -288,12 +328,20 @@ int main() {
             screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
             mode = ++mode % (sizeof(modes) / sizeof(modes[0]));
+            setting_option = 0;
 
-            draw_lcd(mode, running);
+            draw_lcd(mode, setting_option, running);
         }
 
-        if (upBtn && !upBtnStale && !running) {
-            upBtnStale = true;
+        if (mode == 1 && !up_btn_stale && (up_btn_press_time > (1000 / LOOP_DELAY_MS)) && !running) {
+            // Long press changes setting option in bake mode
+            setting_option = (setting_option + 1) % 2;
+            up_btn_stale = true;
+
+            draw_lcd(mode, setting_option, running);
+        }
+
+        if (!up_btn && prev_up_btn && !up_btn_stale && !running) {
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -303,18 +351,20 @@ int main() {
 
             switch (mode) {
                 case 0:
-                    settings[mode] = MIN(settings[mode] + 30, 600);
+                    toast_time = MIN(toast_time + TOAST_TIME_INC, 600);
                     break;
                 case 1:
-                    settings[mode] = MIN(settings[mode] + 25, 500);
+                    if (setting_option == 0)
+                        bake_temp = MIN(bake_temp + BAKE_TEMP_INC, 500);
+                    else
+                        bake_time = MIN(bake_time + BAKE_TIME_INC, 1200);
                     break;
             }
 
-            draw_lcd(mode, running);
+            draw_lcd(mode, setting_option, running);
         }
 
-        if (downBtn && !downBtnStale && !running) {
-            downBtnStale = true;
+        if (!down_btn && prev_down_btn && !running) {
             if (is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
@@ -324,39 +374,73 @@ int main() {
 
             switch (mode) {
                 case 0:
-                    settings[mode] = MAX(settings[mode] - 30, 30);
+                    toast_time = MAX(toast_time - TOAST_TIME_INC, 30);
                     break;
                 case 1:
-                    settings[mode] = MAX(settings[mode] - 25, 50);
+                    if (setting_option == 0)
+                        bake_temp = MAX(bake_temp - BAKE_TEMP_INC, 50);
+                    else
+                        bake_time = MAX(bake_time - BAKE_TIME_INC, 30);
                     break;
             }
 
-            draw_lcd(mode, running);
+            draw_lcd(mode, setting_option, running);
         }
 
-        if (startBtn && !startBtnStale) {
-            startBtnStale = true;
-            if (is_nil_time(screenTimeout)) {
+        if (!start_btn && prev_start_btn) {
+            if (!running && is_nil_time(screenTimeout)) {
                 lcd_on();
                 screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
                 continue;
             }
-            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            if (!running) screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
 
             running = !running;
-            if (!running) {
+            if (running) {
+                screenTimeout = nil_time;
+                start_time = get_absolute_time();
+                temp_target = (mode == 1) ? (int)((float)(bake_temp - 32) * (5.0f / 9.0f)) : 0;
+                time_target = ((mode == 0) ? toast_time : bake_time) * 1000; // convert seconds -> ms
+                timer_counting = mode == 0;
+            } else {
                 gpio_put(PIN_RELAY, 0);
-                draw_lcd(mode, running);
+                draw_lcd(mode, setting_option, running);
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             }
         }
 
+        /* perform periodic LCD updates (also updated immediately on button events)
+           Only redraw when the displayed seconds would change, or as a fallback
+           at least every LCD_UPDATE_MS. This prevents a large blocking I2C write
+           from happening every few loops and causing visible jumps. */
+        int current_display_seconds = -1;
         if (running) {
-            draw_lcd(mode, running);
-            
-            switch (mode) {
-                case 0:
-                    gpio_put(PIN_RELAY, 1);
-                    break;
+            current_display_seconds = (int)roundf((float)time_target / 1000.0f);
+        }
+        int64_t since_lcd = absolute_time_diff_us(last_lcd_update, get_absolute_time()) / 1000;
+        if (!running || current_display_seconds != last_display_seconds || since_lcd >= LCD_UPDATE_MS) {
+            draw_lcd(mode, setting_option, running);
+            last_lcd_update = get_absolute_time();
+            last_display_seconds = current_display_seconds;
+        }
+
+        /* compute elapsed time for the whole iteration and apply when running */
+        int32_t delta_us = absolute_time_diff_us(last_time, get_absolute_time());
+        int32_t delta_ms = (int32_t)((delta_us + 500) / 1000); // round to nearest ms
+        if (running) {
+            time_target -= delta_ms;
+            printf("Timing: %d %d\n", to_ms_since_boot(last_time), to_ms_since_boot(get_absolute_time()));
+            printf("Time Target: %d (%d) diff: %d\n", time_target, (int)roundf((float)time_target / 1000.0f), delta_ms);
+            // Diagnostic: compare real elapsed time (ms) with counted-down elapsed time (ms)
+            int32_t initial_ms = ((mode == 0) ? toast_time : bake_time) * 1000;
+            int64_t real_elapsed_ms = absolute_time_diff_us(start_time, get_absolute_time()) / 1000;
+            int32_t counted_elapsed_ms = initial_ms - time_target;
+            printf("Elapsed real: %lld ms, counted: %d ms\n", (long long)real_elapsed_ms, counted_elapsed_ms);
+
+            if (time_target <= 0) {
+                gpio_put(PIN_RELAY, 0);
+                running = false;
+                draw_lcd(mode, setting_option, running);
             }
         }
     }
