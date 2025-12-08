@@ -9,6 +9,14 @@
 // Settings
 #define SCREEN_TIMEOUT 30000
 
+char* modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
+char* running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
+
+int settings[3] = {300, 350, 0};
+
+int time_target = 0;
+int temp_target = 0;
+
 // SPI Defines
 #define SPI_PORT spi1
 #define PIN_MISO 12
@@ -23,10 +31,10 @@
 
 #define PIN_RELAY 7
 
-#define PIN_BTN_MODE 16
-#define PIN_BTN_UP   17
-#define PIN_BTN_DWN  18
-#define PIN_BTN_STRT 19
+#define PIN_BTN_MODE  16
+#define PIN_BTN_UP    17
+#define PIN_BTN_DOWN  18
+#define PIN_BTN_START 19
 
 // commands
 const int LCD_CLEARDISPLAY = 0x01;
@@ -133,6 +141,16 @@ void lcd_init() {
     lcd_clear();
 }
 
+void lcd_off() {
+    backlightEnabled = false;
+    lcd_send_byte(LCD_DISPLAYCONTROL, LCD_COMMAND);
+}
+
+void lcd_on() {
+    backlightEnabled = true;
+    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON, LCD_COMMAND);
+}
+
 float read_temp() {
     uint8_t buffer[2];
 
@@ -146,6 +164,36 @@ float read_temp() {
     uint16_t raw = ((uint16_t)buffer[0] << 8) | (uint16_t)buffer[1];
     raw = raw >> 3;
     return (float)raw * 0.25f;
+}
+
+void get_settings_str(uint8_t mode, char* str) {
+    switch (mode) {
+        case 0:
+            snprintf(str, 16, "  Time: %02d:%02d  ", settings[mode] / 60, settings[mode] % 60);
+            break;
+        case 1:
+            snprintf(str, 16, "   Temp: %3dF    ", settings[mode]);
+            break;
+        default:
+        case 2:
+            snprintf(str, 16, "                ");
+            break;
+    }
+}
+
+void draw_lcd(uint8_t mode, bool running) {
+    if (!running) {
+        lcd_set_cursor(0, 0);
+        lcd_string(modes[mode]);
+
+        lcd_set_cursor(1, 0);
+        char settings_str[16];
+        get_settings_str(mode, settings_str);
+        lcd_string(settings_str);
+    } else {
+        lcd_set_cursor(0, 0);
+        lcd_string(running_modes[mode]);
+    }
 }
 
 int main() {
@@ -165,18 +213,21 @@ int main() {
     // For more examples of SPI use see https://github.com/raspberrypi/pico-examples/tree/master/spi
 
     // Set up button pins
-    gpio_set_function(PIN_BTN_MODE, GPIO_FUNC_SIO);
-    gpio_set_function(PIN_BTN_UP,   GPIO_FUNC_SIO);
-    gpio_set_function(PIN_BTN_DWN,  GPIO_FUNC_SIO);
-    gpio_set_function(PIN_BTN_STRT, GPIO_FUNC_SIO);
-    gpio_set_dir(PIN_BTN_MODE, GPIO_IN);
-    gpio_set_dir(PIN_BTN_UP,   GPIO_IN);
-    gpio_set_dir(PIN_BTN_DWN,  GPIO_IN);
-    gpio_set_dir(PIN_BTN_STRT, GPIO_IN);
+    gpio_set_function(PIN_BTN_MODE,  GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_UP,    GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_DOWN,  GPIO_FUNC_SIO);
+    gpio_set_function(PIN_BTN_START, GPIO_FUNC_SIO);
+    gpio_set_dir(PIN_BTN_MODE,  GPIO_IN);
+    gpio_set_dir(PIN_BTN_UP,    GPIO_IN);
+    gpio_set_dir(PIN_BTN_DOWN,  GPIO_IN);
+    gpio_set_dir(PIN_BTN_START, GPIO_IN);
     gpio_pull_up(PIN_BTN_MODE);
     gpio_pull_up(PIN_BTN_UP);
-    gpio_pull_up(PIN_BTN_DWN);
-    gpio_pull_up(PIN_BTN_STRT);
+    gpio_pull_up(PIN_BTN_DOWN);
+    gpio_pull_up(PIN_BTN_START);
+
+    gpio_set_function(PIN_RELAY, GPIO_FUNC_SIO);
+    gpio_set_dir(PIN_RELAY, GPIO_OUT);
 
     // I2C Initialisation. Using it at 100Khz.
     i2c_init(I2C_PORT, 100000);
@@ -189,17 +240,124 @@ int main() {
 
     lcd_init();
     lcd_clear();
-    lcd_string("Hello World :)");
 
+    bool modeBtn = false;
+    bool modeBtnStale = false;
+
+    bool upBtn = false;
+    bool upBtnStale = false;
+
+    bool downBtn = false;
+    bool downBtnStale = false;
+
+    bool startBtn = false;
+    bool startBtnStale = false;
+
+    uint8_t mode = 0;
+    bool running = false;
     absolute_time_t screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+    draw_lcd(mode, running);
     while (true) {
-        if (absolute_time_min(get_absolute_time(), screenTimeout) == screenTimeout) {
-            backlightEnabled = false;
-            lcd_send_byte(LCD_DISPLAYCONTROL, LCD_COMMAND);
+        sleep_ms(50);
+
+        if (!is_nil_time(screenTimeout) && absolute_time_min(get_absolute_time(), screenTimeout) == screenTimeout) {
+            screenTimeout = nil_time;
+            lcd_off();
         }
 
-        printf("Button Status: %d %d %d %d\n", gpio_get(PIN_BTN_MODE), gpio_get(PIN_BTN_UP), gpio_get(PIN_BTN_DWN), gpio_get(PIN_BTN_STRT));
+        modeBtn = !gpio_get(PIN_BTN_MODE);
+        modeBtnStale = modeBtnStale && modeBtn;
+        
+        startBtn = !gpio_get(PIN_BTN_START);
+        startBtnStale = startBtnStale && startBtn;
 
-        sleep_ms(1000);
+        upBtn = !gpio_get(PIN_BTN_UP);
+        upBtnStale = upBtnStale && upBtn;
+
+        downBtn = !gpio_get(PIN_BTN_DOWN);
+        downBtnStale = downBtnStale && downBtn;
+
+        if (modeBtn && !modeBtnStale && !running) {
+            modeBtnStale = true;
+            if (is_nil_time(screenTimeout)) {
+                lcd_on();
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+                continue;
+            }
+            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+            mode = ++mode % (sizeof(modes) / sizeof(modes[0]));
+
+            draw_lcd(mode, running);
+        }
+
+        if (upBtn && !upBtnStale && !running) {
+            upBtnStale = true;
+            if (is_nil_time(screenTimeout)) {
+                lcd_on();
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+                continue;
+            }
+            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+            switch (mode) {
+                case 0:
+                    settings[mode] = MIN(settings[mode] + 30, 600);
+                    break;
+                case 1:
+                    settings[mode] = MIN(settings[mode] + 25, 500);
+                    break;
+            }
+
+            draw_lcd(mode, running);
+        }
+
+        if (downBtn && !downBtnStale && !running) {
+            downBtnStale = true;
+            if (is_nil_time(screenTimeout)) {
+                lcd_on();
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+                continue;
+            }
+            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+            switch (mode) {
+                case 0:
+                    settings[mode] = MAX(settings[mode] - 30, 30);
+                    break;
+                case 1:
+                    settings[mode] = MAX(settings[mode] - 25, 50);
+                    break;
+            }
+
+            draw_lcd(mode, running);
+        }
+
+        if (startBtn && !startBtnStale) {
+            startBtnStale = true;
+            if (is_nil_time(screenTimeout)) {
+                lcd_on();
+                screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+                continue;
+            }
+            screenTimeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+            running = !running;
+            if (!running) {
+                gpio_put(PIN_RELAY, 0);
+                draw_lcd(mode, running);
+            }
+        }
+
+        if (running) {
+            draw_lcd(mode, running);
+            
+            switch (mode) {
+                case 0:
+                    gpio_put(PIN_RELAY, 1);
+                    break;
+            }
+        }
     }
 }
