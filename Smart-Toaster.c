@@ -18,7 +18,7 @@
 #define LCD_UPDATE_MS 200
 
 // Debug prints (set to 1 to enable)
-#define DEBUG 0
+#define DEBUG 1
 #if DEBUG
 #define DPRINTF(...) printf(__VA_ARGS__)
 #else
@@ -337,7 +337,7 @@ int main() {
         prev_up_btn = up_btn;
         up_btn = !gpio_get(PIN_BTN_UP);
         up_btn_stale = up_btn_stale && prev_up_btn;
-        up_btn_press_time = up_btn * (up_btn_press_time + 1);
+        up_btn_press_time = up_btn * (up_btn_press_time + absolute_time_diff_us(last_time, get_absolute_time()) / 1000);
 
         prev_down_btn = down_btn;
         down_btn = !gpio_get(PIN_BTN_DOWN);
@@ -359,9 +359,11 @@ int main() {
             lcd_force_update(mode, setting_option, running);
         }
 
-        if (mode == 1 && !up_btn_stale && (up_btn_press_time > (1000 / LOOP_DELAY_MS)) && !running) {
+        DPRINTF("Up Button Stale: %d, Press Time: %d, Running: %d, Mode: %d\n", up_btn_stale, up_btn_press_time, running, mode);
+        if (mode == 1 && !up_btn_stale && (up_btn_press_time >= 1000 / LOOP_DELAY_MS) && !running) {
             // Long press changes setting option in bake mode
             setting_option = (setting_option + 1) % 2;
+            DPRINTF("long press happened\n");
             up_btn_stale = true;
 
             lcd_force_update(mode, setting_option, running);
