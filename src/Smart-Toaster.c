@@ -2,6 +2,7 @@
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "hardware/i2c.h"
+#include "lcd.h"
 
 #include <stdint.h>
 
@@ -20,7 +21,7 @@
 #define PIN_RELAY 7
 
 float read_temp() {
-    uint8_t buffer[1];
+    uint8_t buffer[2];
 
     gpio_put(PIN_CS, 0);
     sleep_ms(10);
@@ -61,6 +62,7 @@ int main() {
 
     while (true) {
         printf("Hello, world! Temp is %f\n", read_temp());
+        sayHello();
         sleep_ms(1000);
     }
 }
