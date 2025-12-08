@@ -14,6 +14,7 @@
 #define BAKE_TEMP_INC   25
 #define LOOP_DELAY_MS   20
 #define TEMP_HYSTERESIS 2.5
+#define LONG_PRESS_MS   200
 // LCD update interval (ms) to avoid blocking the main loop too long
 #define LCD_UPDATE_MS 200
 
@@ -339,7 +340,7 @@ static void handle_mode_button(ButtonState *b, uint8_t *mode, uint8_t *setting_o
 
 static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_option, bool running, absolute_time_t *screenTimeout) {
     DPRINTF("Up Button Stale: %d, Press Time: %d, Running: %d, Mode: %d\n", b->stale, b->press_time_ms, running, mode);
-    if (mode == 1 && !b->stale && b->press_time_ms >= 500 && !running) {
+    if (mode == 1 && !b->stale && b->press_time_ms >= LONG_PRESS_MS && !running) {
         // Long press changes setting option in bake mode
         *setting_option = (uint8_t)((*setting_option + 1) % 2);
         DPRINTF("long press happened\n");
