@@ -41,11 +41,11 @@ pico_set_program_name(Smart-Toaster "Smart-Toaster")
 pico_set_program_version(Smart-Toaster "0.1")
 
 # no_flash means the target is to run from RAM
-pico_set_binary_type(Smart-Toaster no_flash)
+# pico_set_binary_type(Smart-Toaster no_flash)
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(Smart-Toaster 0)
-pico_enable_stdio_usb(Smart-Toaster 0)
+pico_enable_stdio_usb(Smart-Toaster 1)
 
 # Add the standard library to the build
 target_link_libraries(Smart-Toaster
