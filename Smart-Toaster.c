@@ -20,7 +20,7 @@
 #define PIN_RELAY 7
 
 float read_temp() {
-    uint8_t buffer[1];
+    uint8_t buffer[2];
 
     gpio_put(PIN_CS, 0);
     sleep_ms(10);
