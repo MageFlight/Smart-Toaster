@@ -397,32 +397,6 @@ static void init_i2c_and_lcd(void) {
 
 /* --- Main loop helpers: button handlers and timer processing --- */
 static void handle_mode_button(ButtonState *b, uint8_t *mode, uint8_t *setting_option, bool running, absolute_time_t *screen_timeout) {
-    if (b->cur && !b->prev && !running) {
-        if (is_nil_time(*screen_timeout)) {
-            lcd_on();
-            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
-            return;
-        }
-        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
-
-        *mode = ++(*mode) % (sizeof(modes) / sizeof(modes[0]));
-        *setting_option = 0;
-        beep(ACTION_BEEP_LENGTH, false);
-
-        lcd_force_update(*mode, *setting_option, running);
-    }
-}
-
-static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_option, bool running, absolute_time_t *screen_timeout) {
-    if (mode == 1 && !b->stale && b->press_time_ms >= LONG_PRESS_MS && !running) {
-        // Long press changes setting option in bake mode
-        *setting_option = (uint8_t)((*setting_option + 1) % 2);
-        b->stale = true;
-
-        lcd_force_update(mode, *setting_option, running);
-        return;
-    }
-
     // Wake screen on press (rising edge) — feel responsive
     if (b->cur && !b->prev) {
         if (is_nil_time(*screen_timeout)) {
@@ -435,15 +409,42 @@ static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_opti
 
         beep(ACTION_BEEP_LENGTH, false);
     }
-
-    // Short press on release
-    if (!b->cur && b->prev && !b->stale && !running) {
+    
+    // Short Press - Falling Edge
+    if (!b->cur && b->prev && !running && !b->stale) {
         if (is_nil_time(*screen_timeout)) {
             lcd_on();
             *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
             return;
         }
         *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+        *mode = ++(*mode) % (sizeof(modes) / sizeof(modes[0]));
+        *setting_option = 0;
+
+        lcd_force_update(*mode, *setting_option, running);
+    }
+
+    // Long press changes setting option in bake mode
+    if (*mode == 1 && !b->stale && b->press_time_ms >= LONG_PRESS_MS && !running) {
+        *setting_option = (uint8_t)((*setting_option + 1) % 2);
+        b->stale = true;
+
+        lcd_force_update(*mode, *setting_option, running);
+        return;
+    }
+}
+
+static void handle_up_button(ButtonState *b, uint8_t mode, uint8_t *setting_option, bool running, absolute_time_t *screen_timeout) {
+    if (b->cur && !b->prev && !running) {
+        if (is_nil_time(*screen_timeout)) {
+            lcd_on();
+            *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+            return;
+        }
+        *screen_timeout = make_timeout_time_ms(SCREEN_TIMEOUT);
+
+        beep(ACTION_BEEP_LENGTH, false);
 
         switch (mode) {
             case 0:
