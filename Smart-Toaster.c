@@ -26,7 +26,7 @@
 
 // Debug prints (set to 1 to enable). Keep disabled by default to avoid
 // expensive blocking stdio calls in tight loops.
-#define DEBUG 1
+#define DEBUG 0
 #if DEBUG
 #define DPRINTF(...) printf(__VA_ARGS__)
 #else
@@ -383,7 +383,7 @@ static void init_buzzer() {
 }
 
 static void init_i2c_and_lcd(void) {
-    i2c_init(I2C_PORT, 100000);
+    i2c_init(I2C_PORT, 400000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA);
