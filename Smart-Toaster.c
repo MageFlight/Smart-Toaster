@@ -16,7 +16,9 @@
 #define TEMP_HYSTERESIS 2.5
 #define LONG_PRESS_MS   200
 // LCD update interval (ms) to avoid blocking the main loop too long
-#define LCD_UPDATE_MS 200
+#define LCD_UPDATE_MS   200
+
+#define MIN_TEMP_REFRESH_US 220000
 
 #define ACTION_BEEP_LENGTH   50
 #define START_BEEP_LENGTH    200 
@@ -24,7 +26,7 @@
 
 // Debug prints (set to 1 to enable). Keep disabled by default to avoid
 // expensive blocking stdio calls in tight loops.
-#define DEBUG 0
+#define DEBUG 1
 #if DEBUG
 #define DPRINTF(...) printf(__VA_ARGS__)
 #else
@@ -32,13 +34,20 @@
 #endif
 
 /* --- Global configuration and state --- */
-static const char *const modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
-static const char *const running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
+static const char* const modes[] = {"     Toast      ", "      Bake      ", "    Passthru    "};
+static const char* const running_modes[] = {"  Toasting...   ", "   Baking...    ", "    Passthru    "};
 
 static int toast_time = 10; // seconds
 static int bake_time = 300;  // seconds
-static int bake_temp = 350;  // Fahrenheit
-static bool timer_counting = false;
+static int bake_temp = 82;  // Fahrenheit
+
+/**
+ * 0: Preheating
+ * 1: Ready
+ * 2: Cooking
+ */
+static uint8_t heating_stage = 0;
+static uint8_t prev_heating_stage = 0;
 
 static absolute_time_t start_time;
 static int time_target = 0; // In milliseconds
@@ -104,6 +113,31 @@ static int lcd_addr = 0x27; // default I2C addr
 
 #define MAX_LINES      2
 #define MAX_CHARS      16
+
+static float current_temp = -1;
+static absolute_time_t last_temp_check = 0;
+
+/**
+ * Updates the current temperature
+ * @returns Whether the temperature was update (Irrespective of whether it was changed)
+ */
+static bool update_temp() {
+    if (!is_nil_time(last_temp_check) && absolute_time_diff_us(last_temp_check, get_absolute_time()) < MIN_TEMP_REFRESH_US) {
+        return false;
+    }
+    uint8_t buffer[2];
+
+    gpio_put(PIN_CS, 0);
+    spi_read_blocking(SPI_PORT, 0, buffer, 2);
+    gpio_put(PIN_CS, 1);
+
+    last_temp_check = get_absolute_time();
+
+    uint16_t raw = ((uint16_t)buffer[0] << 8) | (uint16_t)buffer[1];
+    raw = raw >> 3;
+    current_temp = (float)raw * 0.25f;
+    return true;
+}
 
 /* --- Button helper structure and functions --- */
 typedef struct ButtonState {
@@ -226,10 +260,28 @@ static void draw_lcd(uint8_t mode, uint8_t setting_option, bool running) {
         lcd_string(settings_str);
     } else {
         lcd_set_cursor(0, 0);
-        lcd_string(running_modes[mode]);
+        if (mode != 1) {
+            lcd_string(running_modes[mode]);
+        } else {
+            switch (heating_stage) {
+                case 0:
+                    lcd_string(" Preheating...  ");
+                    break;
+                case 1:
+                    lcd_string("Ready:Press MODE");
+                    break;
+                case 2:
+                    lcd_string(running_modes[mode]);
+            }
+            lcd_string(" Preheating...  ");
+        }
 
         lcd_set_cursor(1, 0);
+        float current_temp_f = current_temp * (9.0f / 5.0f) + 32;
+
         int remaining_time = (int)round((float)time_target / 1000.0f);
+
+        DPRINTF("Temp %f, Time: %d\n", current_temp_f, remaining_time);
         switch (mode) {
             case 0: {
                 char time_str[17];
@@ -238,7 +290,9 @@ static void draw_lcd(uint8_t mode, uint8_t setting_option, bool running) {
                 break;
             }
             case 1:
-                // Bake mode running display not implemented in original; leave blank
+                char status_str[17];
+                snprintf(status_str, 17, "%6.2fF    %02d:%02d", current_temp_f, remaining_time / 60, remaining_time % 60);
+                lcd_string(status_str);
                 break;
             case 2:
                 lcd_string("   Running...   ");
@@ -284,22 +338,6 @@ static void beep(int ms, bool synchronus) {
         beeping = true;
         add_alarm_in_ms(ms, beep_callback, NULL, false);
     }
-}
-
-/* --- Read temperature from SPI sensor (unchanged) --- */
-float read_temp(void) {
-    uint8_t buffer[2];
-
-    gpio_put(PIN_CS, 0);
-    sleep_ms(10);
-    spi_read_blocking(SPI_PORT, 0, buffer, 2);
-    sleep_ms(10);
-    gpio_put(PIN_CS, 1);
-
-    DPRINTF("Data: %d %d\n", buffer[0], buffer[1]);
-    uint16_t raw = ((uint16_t)buffer[0] << 8) | (uint16_t)buffer[1];
-    raw = raw >> 3;
-    return (float)raw * 0.25f;
 }
 
 /* --- Initialization split out for clarity --- */
@@ -464,9 +502,9 @@ static void handle_start_button(ButtonState *b, uint8_t mode, uint8_t setting_op
         if (*running) {
             *screen_timeout = nil_time;
             start_time = get_absolute_time();
-            temp_target = (mode == 1) ? (int)((float)(bake_temp - 32) * (5.0f / 9.0f)) : 0;
+            temp_target = (mode == 1) ? (int)((float)(bake_temp - 32) * (5.0f / 9.0f)) : 260;
             time_target = ((mode == 0) ? toast_time : bake_time) * 1000; // convert seconds -> ms
-            timer_counting = (mode == 0);
+            heating_stage = mode == 0 ? 2 : 0; // Skip preheat for toast operation
         } else {
             DPRINTF("Button stopped\n");
             gpio_put(PIN_RELAY, 0);
@@ -476,7 +514,24 @@ static void handle_start_button(ButtonState *b, uint8_t mode, uint8_t setting_op
     }
 }
 
-static void process_cycle(bool *running, uint8_t mode, uint8_t setting_option, absolute_time_t* screen_timeout) {
+static void process_cycle(bool *running, uint8_t mode, uint8_t setting_option, absolute_time_t* screen_timeout, ButtonState* modeBtn) {
+    prev_heating_stage = heating_stage;
+    if (heating_stage == 0 && current_temp >= temp_target - TEMP_HYSTERESIS) {
+        heating_stage = 1;
+        beep(500, false);
+    }
+    
+    if (heating_stage == 1 && modeBtn->cur && !modeBtn->prev) {
+        beep(ACTION_BEEP_LENGTH, false);
+        heating_stage = 2;
+    }
+
+    if (current_temp <= temp_target - TEMP_HYSTERESIS) {
+        gpio_put(PIN_RELAY, 1);
+    } else if (current_temp >= temp_target + TEMP_HYSTERESIS) {
+        gpio_put(PIN_RELAY, 0);
+    }
+    
     if (time_target <= 0) {
         gpio_put(PIN_RELAY, 0);
         *running = false;
@@ -525,6 +580,8 @@ int main(void) {
             lcd_off();
         }
 
+        update_temp();
+
         // Update buttons with the measured delta
         button_update(&mode_btn, delta_ms);
         button_update(&up_btn, delta_ms);
@@ -541,10 +598,12 @@ int main(void) {
         if (running) {
             // Update LCD periodically or when needed
             lcd_maybe_update(mode, setting_option, running);
+            
+            process_cycle(&running, mode, setting_option, &screen_timeout, &mode_btn);
+            int32_t delta_us = absolute_time_diff_us(loop_start, get_absolute_time());
+            int32_t delta_ms = (int32_t)((delta_us + 500) / 1000);
 
-            time_target -= delta_ms;
-            DPRINTF("Time Target: %d (%d) diff: %d\n", time_target, (int)roundf((float)time_target / 1000.0f), delta_ms);
-            process_cycle(&running, mode, setting_option, &screen_timeout);
+            time_target -= delta_ms * (heating_stage == 2);
         }
     }
 }
